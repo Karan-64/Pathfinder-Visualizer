@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pathfinder</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&display=swap">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="panel">
+    <h1>Pathfinder</h1>
+    <p class="lead">Chart a route across the grid. Draw obstacles, pick a method, and watch the search spread.</p>
+
+    <label class="field" for="alg">Method</label>
+    <select id="alg">
+      <option value="astar">A* search</option>
+      <option value="dijkstra">Dijkstra</option>
+      <option value="bfs">Breadth-first</option>
+      <option value="greedy">Greedy best-first</option>
+    </select>
+    <p class="note" id="algNote"></p>
+
+    <span class="field">Brush</span>
+    <div class="seg" role="group" aria-label="Brush">
+      <button data-b="1" aria-pressed="true">Wall</button>
+      <button data-b="2" aria-pressed="false">Mud</button>
+      <button data-b="0" aria-pressed="false">Erase</button>
+    </div>
+
+    <label class="field" for="spd">Speed</label>
+    <input type="range" id="spd" min="1" max="40" value="8">
+
+    <div class="actions">
+      <button class="primary" id="run">Run search</button>
+      <button id="clr">Clear path</button>
+      <button id="maze">Random obstacles</button>
+      <button id="rst">Reset grid</button>
+    </div>
+  </aside>
+
+  <main class="stage">
+    <div id="wrap"><canvas id="c"></canvas></div>
+    <dl class="stats">
+      <div><dt>Searched</dt><dd id="sv">0</dd></div>
+      <div><dt>Steps</dt><dd id="sl">–</dd></div>
+      <div><dt>Cost</dt><dd id="sc">–</dd></div>
+    </dl>
+    <ul class="key">
+      <li><i class="k-start"></i>Start</li>
+      <li><i class="k-goal"></i>Goal</li>
+      <li><i class="k-mud"></i>Mud (cost 5)</li>
+      <li><i class="k-front"></i>Frontier</li>
+      <li><i class="k-vis"></i>Searched</li>
+      <li><i class="k-path"></i>Route</li>
+    </ul>
+  </main>
+</div>
+<script src="../js/script.js"></script>
+</body>
+</html>
