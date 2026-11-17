@@ -1,214 +1,355 @@
-(function () {
-  var $ = function (id) { return document.getElementById(id); };
-  var cv = $('c'), cx = cv.getContext('2d'), stage = document.querySelector('.stage');
+(() => {
+  "use strict";
 
-  // ---- Grid setup ----
-  var avail = Math.min(stage.clientWidth - 28, 920);
-  var narrow = avail < 520;
-  var cols = narrow ? 16 : 34, rows = narrow ? 22 : 20;
-  var cell = Math.floor(avail / cols);
-  var dpr = window.devicePixelRatio || 1;
-  cv.style.width = cols * cell + 'px';
-  cv.style.height = rows * cell + 'px';
-  cv.width = cols * cell * dpr;
-  cv.height = rows * cell * dpr;
-  cx.scale(dpr, dpr);
+  const $ = (id) => document.getElementById(id);
+  const canvas = $("c");
+  const ctx = canvas.getContext("2d");
+  const stage = document.querySelector(".stage");
 
-  var N = cols * rows;
-  var terrain = new Uint8Array(N);   // 0 open, 1 wall, 2 mud
-  var state = new Uint8Array(N);     // 0 none, 1 searched, 2 frontier, 3 route
-  var mid = Math.floor(rows / 2) * cols;
-  var start = mid + 2, goal = mid + cols - 3;
-  var brush = 1, raf = null, busy = false;
-
-  var NOTES = {
-    astar: 'Guided by distance to the goal. Finds the cheapest route with little wasted search.',
-    dijkstra: 'Expands evenly by cost. Always cheapest, but searches in every direction.',
-    bfs: 'Counts steps and ignores mud. Fewest steps, not always cheapest.',
-    greedy: 'Heads straight for the goal. Fast, but the route can be longer than needed.'
+  const COLORS = {
+    bg: "#0b1727", line: "rgba(128, 158, 194, .18)",
+    wall: "#354760", mud: "#a9783f", explored: "#1b4161",
+    frontier: "#28799d", route: "#53d6c2", start: "#5ce0a0",
+    goal: "#ff728e"
   };
 
-  function css(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+  let cols = 34, rows = 20, cell = 20, dpr = 1;
+  let terrain = new Uint8Array(cols * rows);
+  let state = new Uint8Array(cols * rows);
+  let start = Math.floor(rows / 2) * cols + 2;
+  let goal = Math.floor(rows / 2) * cols + cols - 3;
+  let brush = 1, raf = null, busy = false, drag = null;
+  let lastRunToken = 0;
 
-  // ---- Drawing ----
+  const NOTES = {
+    astar: "Balances distance travelled and estimated distance remaining. Usually explores fewer nodes.",
+    dijkstra: "Expands by total travel cost. Guarantees the cheapest route when terrain has different costs.",
+    bfs: "Explores by number of steps. Finds the fewest-step route, but ignores mud cost.",
+    greedy: "Moves toward the goal using only the heuristic. Can be quick, but is not guaranteed optimal."
+  };
+
+  function indexOf(x, y) { return y * cols + x; }
+  function cost(i) { return terrain[i] === 2 ? 5 : 1; }
+  function heuristic(i) {
+    return Math.abs(i % cols - goal % cols) +
+      Math.abs(Math.floor(i / cols) - Math.floor(goal / cols));
+  }
+  function neighbors(i) {
+    const x = i % cols, y = Math.floor(i / cols), out = [];
+    if (y > 0) out.push(i - cols);
+    if (x < cols - 1) out.push(i + 1);
+    if (y < rows - 1) out.push(i + cols);
+    if (x > 0) out.push(i - 1);
+    return out;
+  }
+
+  function fitCanvas() {
+    const available = Math.max(280, Math.min(stage.clientWidth - 28, 920));
+    const previousCols = cols, previousRows = rows;
+    const narrow = available < 520;
+    const nextCols = narrow ? 16 : 34;
+    const nextRows = narrow ? 22 : 20;
+    const previousTerrain = terrain;
+    cols = nextCols;
+    rows = nextRows;
+    cell = Math.max(12, Math.floor(available / cols));
+    dpr = Math.max(1, window.devicePixelRatio || 1);
+    const oldCols = previousCols, oldRows = previousRows;
+    const previousStart = start, previousGoal = goal;
+    terrain = new Uint8Array(cols * rows);
+    state = new Uint8Array(cols * rows);
+    start = Math.floor(rows / 2) * cols + 2;
+    goal = Math.floor(rows / 2) * cols + cols - 3;
+
+    if (previousTerrain.length && oldCols) {
+      for (let y = 0; y < Math.min(rows, oldRows); y++) {
+        for (let x = 0; x < Math.min(cols, oldCols); x++) {
+          terrain[indexOf(x, y)] = previousTerrain[y * oldCols + x];
+        }
+      }
+      const sx = previousStart % oldCols, sy = Math.floor(previousStart / oldCols);
+      const gx = previousGoal % oldCols, gy = Math.floor(previousGoal / oldCols);
+      if (sx < cols && sy < rows) start = indexOf(sx, sy);
+      if (gx < cols && gy < rows) goal = indexOf(gx, gy);
+    }
+    if (start === goal) goal = Math.max(0, terrain.length - 3);
+    canvas.style.width = (cols * cell) + "px";
+    canvas.style.height = (rows * cell) + "px";
+    canvas.width = Math.round(cols * cell * dpr);
+    canvas.height = Math.round(rows * cell * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    $("gridSize").textContent = `${cols} × ${rows} GRID`;
+    draw();
+  }
+
   function draw() {
-    var c = {
-      bg: css('--bg'), line: css('--line'), wall: css('--wall'), mud: css('--mud'),
-      vis: css('--vis'), front: css('--front'), route: css('--route'),
-      start: css('--start'), goal: css('--goal')
-    };
-    cx.fillStyle = c.bg;
-    cx.fillRect(0, 0, cols * cell, rows * cell);
+    ctx.clearRect(0, 0, cols * cell, rows * cell);
+    ctx.fillStyle = COLORS.bg;
+    ctx.fillRect(0, 0, cols * cell, rows * cell);
 
-    for (var i = 0; i < N; i++) {
-      var x = (i % cols) * cell, y = Math.floor(i / cols) * cell, fill = null;
-      if (terrain[i] === 1) fill = c.wall;
-      else if (state[i] === 3) fill = c.route;
-      else if (state[i] === 2) fill = c.front;
-      else if (state[i] === 1) fill = c.vis;
-      else if (terrain[i] === 2) fill = c.mud;
-      if (fill) { cx.fillStyle = fill; cx.fillRect(x, y, cell, cell); }
-      if (terrain[i] === 2 && state[i] && state[i] !== 3) {
-        cx.fillStyle = c.mud; cx.fillRect(x + cell * .3, y + cell * .3, cell * .4, cell * .4);
+    for (let i = 0; i < terrain.length; i++) {
+      const x = (i % cols) * cell, y = Math.floor(i / cols) * cell;
+      let fill = null;
+      if (terrain[i] === 1) fill = COLORS.wall;
+      else if (state[i] === 3) fill = COLORS.route;
+      else if (state[i] === 2) fill = COLORS.frontier;
+      else if (state[i] === 1) fill = COLORS.explored;
+      else if (terrain[i] === 2) fill = COLORS.mud;
+      if (fill) {
+        ctx.fillStyle = fill;
+        ctx.fillRect(x + 1, y + 1, cell - 2, cell - 2);
+      }
+      if (terrain[i] === 2 && state[i] !== 3) {
+        ctx.fillStyle = "rgba(255,226,181,.75)";
+        ctx.font = `${Math.max(7, cell * .42)}px Manrope, sans-serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("×5", x + cell / 2, y + cell / 2);
       }
     }
 
-    cx.strokeStyle = c.line; cx.lineWidth = 1; cx.beginPath();
-    for (var a = 0; a <= cols; a++) { cx.moveTo(a * cell + .5, 0); cx.lineTo(a * cell + .5, rows * cell); }
-    for (var b = 0; b <= rows; b++) { cx.moveTo(0, b * cell + .5); cx.lineTo(cols * cell, b * cell + .5); }
-    cx.stroke();
-
-    marker(start, c.start, c.bg);
-    marker(goal, c.goal, c.bg);
+    ctx.strokeStyle = COLORS.line;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let x = 0; x <= cols; x++) {
+      ctx.moveTo(x * cell + .5, 0);
+      ctx.lineTo(x * cell + .5, rows * cell);
+    }
+    for (let y = 0; y <= rows; y++) {
+      ctx.moveTo(0, y * cell + .5);
+      ctx.lineTo(cols * cell, y * cell + .5);
+    }
+    ctx.stroke();
+    marker(start, COLORS.start, "S");
+    marker(goal, COLORS.goal, "G");
   }
 
-  function marker(i, col, ring) {
-    var x = (i % cols) * cell + cell / 2, y = Math.floor(i / cols) * cell + cell / 2;
-    cx.fillStyle = col; cx.beginPath(); cx.arc(x, y, cell * .38, 0, Math.PI * 2); cx.fill();
-    cx.strokeStyle = ring; cx.lineWidth = 2; cx.stroke();
+  function marker(i, color, label) {
+    const x = (i % cols) * cell + cell / 2;
+    const y = Math.floor(i / cols) * cell + cell / 2;
+    ctx.beginPath();
+    ctx.fillStyle = color;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 10;
+    ctx.arc(x, y, Math.max(5, cell * .34), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    if (cell >= 17) {
+      ctx.fillStyle = "#07111d";
+      ctx.font = `800 ${Math.max(8, cell * .48)}px Manrope, sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, x, y + .5);
+    }
   }
 
-  function setStats(v, l, c) { $('sv').textContent = v; $('sl').textContent = l; $('sc').textContent = c; }
-
-  // ---- Search helpers ----
-  function cost(i) { return terrain[i] === 2 ? 5 : 1; }
-  function neighbors(i) {
-    var r = [], x = i % cols, y = (i - x) / cols;
-    if (y > 0) r.push(i - cols);
-    if (x < cols - 1) r.push(i + 1);
-    if (y < rows - 1) r.push(i + cols);
-    if (x > 0) r.push(i - 1);
-    return r;
+  function setStats(explored, length, total) {
+    $("sv").textContent = explored;
+    $("sl").textContent = length;
+    $("sc").textContent = total;
   }
-  function heur(i) {
-    return Math.abs(i % cols - goal % cols) + Math.abs(Math.floor(i / cols) - Math.floor(goal / cols));
+  function stop() {
+    if (raf !== null) cancelAnimationFrame(raf);
+    raf = null;
+    busy = false;
+    $("run").disabled = false;
+    $("run").innerHTML = '<span class="play-icon">▶</span> Find shortest path <span class="button-arrow">↗</span>';
+  }
+  function resetState() {
+    state.fill(0);
+    setStats(0, "—", "—");
+  }
+  function clearPath() {
+    lastRunToken++;
+    stop();
+    resetState();
+    draw();
   }
 
-  function stop() { if (raf) cancelAnimationFrame(raf); raf = null; busy = false; }
-  function resetState() { state.fill(0); setStats(0, '–', '–'); }
-  function clearPath() { stop(); resetState(); draw(); }
-
-  // ---- Run a search ----
   function run() {
     clearPath();
+    const token = ++lastRunToken;
     busy = true;
-    var alg = $('alg').value;
-    var g = new Float64Array(N).fill(Infinity);
-    var prev = new Int32Array(N).fill(-1);
-    var closed = new Uint8Array(N), inOpen = new Uint8Array(N), order = new Float64Array(N);
-    var open = [start], counter = 0, seen = 0;
-    g[start] = 0; inOpen[start] = 1;
+    $("run").disabled = true;
+    $("run").textContent = "Searching…";
+    const algorithm = $("alg").value;
+    const count = terrain.length;
+    const distance = new Float64Array(count).fill(Infinity);
+    const previous = new Int32Array(count).fill(-1);
+    const closed = new Uint8Array(count);
+    const inOpen = new Uint8Array(count);
+    const order = new Float64Array(count);
+    const open = [start];
+    let sequence = 0, explored = 0;
+    distance[start] = 0;
+    inOpen[start] = 1;
 
-    function key(i) {
-      if (alg === 'bfs') return order[i];
-      if (alg === 'dijkstra') return g[i];
-      if (alg === 'astar') return g[i] + heur(i);
-      return heur(i);
+    function priority(i) {
+      if (algorithm === "bfs") return order[i];
+      if (algorithm === "dijkstra") return distance[i];
+      if (algorithm === "astar") return distance[i] + heuristic(i);
+      return heuristic(i);
     }
 
     function finish(found) {
+      if (token !== lastRunToken) return;
       busy = false;
-      if (!found) { setStats(seen, 'none', '–'); draw(); return; }
-      var p = [], k = goal;
-      while (k !== -1) { p.push(k); k = prev[k]; }
-      p.reverse();
-      var total = 0;
-      for (var j = 1; j < p.length; j++) total += cost(p[j]);
-      var idx = 0;
-      (function trace() {
-        if (idx < p.length) { state[p[idx++]] = 3; draw(); raf = requestAnimationFrame(trace); }
-        else setStats(seen, p.length - 1, total);
-      })();
+      $("run").disabled = false;
+      $("run").innerHTML = '<span class="play-icon">▶</span> Find shortest path <span class="button-arrow">↗</span>';
+      if (!found) {
+        setStats(explored, "No route", "—");
+        draw();
+        return;
+      }
+      const path = [];
+      let node = goal;
+      while (node !== -1) {
+        path.push(node);
+        node = previous[node];
+      }
+      path.reverse();
+      let totalCost = 0;
+      for (let p = 1; p < path.length; p++) totalCost += cost(path[p]);
+      let cursor = 0;
+      function reveal() {
+        if (token !== lastRunToken) return;
+        if (cursor < path.length) {
+          state[path[cursor++]] = 3;
+          draw();
+          raf = requestAnimationFrame(reveal);
+        } else {
+          raf = null;
+          setStats(explored, path.length - 1, totalCost);
+        }
+      }
+      reveal();
     }
 
     function frame() {
-      var perFrame = +$('spd').value;
-      for (var s = 0; s < perFrame; s++) {
+      if (token !== lastRunToken) return;
+      const perFrame = Number($("spd").value);
+      for (let step = 0; step < perFrame; step++) {
         if (!open.length) { finish(false); return; }
-        var bi = 0, bk = key(open[0]);
-        for (var j = 1; j < open.length; j++) {
-          var kk = key(open[j]);
-          if (kk < bk) { bk = kk; bi = j; }
+        let bestIndex = 0;
+        for (let j = 1; j < open.length; j++) {
+          const candidate = priority(open[j]);
+          const best = priority(open[bestIndex]);
+          if (candidate < best || (candidate === best && distance[open[j]] < distance[open[bestIndex]])) bestIndex = j;
         }
-        var cur = open.splice(bi, 1)[0];
-        inOpen[cur] = 0; closed[cur] = 1; seen++; state[cur] = 1;
-        if (cur === goal) { finish(true); return; }
+        const current = open.splice(bestIndex, 1)[0];
+        inOpen[current] = 0;
+        if (closed[current]) continue;
+        closed[current] = 1;
+        explored++;
+        state[current] = 1;
+        if (current === goal) { finish(true); return; }
 
-        var ns = neighbors(cur);
-        for (var q = 0; q < ns.length; q++) {
-          var m = ns[q];
-          if (terrain[m] === 1 || closed[m]) continue;
-          var ng = g[cur] + (alg === 'bfs' ? 1 : cost(m));
-          var better = alg === 'bfs' ? g[m] === Infinity : ng < g[m];
-          if (better) {
-            g[m] = ng; prev[m] = cur;
-            if (alg === 'bfs') order[m] = counter++;
-            if (!inOpen[m]) { inOpen[m] = 1; open.push(m); state[m] = 2; }
+        for (const next of neighbors(current)) {
+          if (terrain[next] === 1 || closed[next]) continue;
+          const stepCost = algorithm === "bfs" ? 1 : cost(next);
+          const nextDistance = distance[current] + stepCost;
+          const improved = algorithm === "bfs" ? distance[next] === Infinity : nextDistance < distance[next];
+          if (improved) {
+            distance[next] = nextDistance;
+            previous[next] = current;
+            if (algorithm === "bfs") order[next] = sequence++;
+            if (!inOpen[next]) {
+              inOpen[next] = 1;
+              open.push(next);
+              state[next] = 2;
+            }
           }
         }
       }
-      setStats(seen, '…', '…');
+      setStats(explored, "…", "…");
       draw();
       raf = requestAnimationFrame(frame);
     }
     raf = requestAnimationFrame(frame);
   }
 
-  // ---- Pointer input ----
-  var drag = null;
-  function cellAt(e) {
-    var r = cv.getBoundingClientRect();
-    var x = Math.floor((e.clientX - r.left) / cell), y = Math.floor((e.clientY - r.top) / cell);
-    return (x < 0 || y < 0 || x >= cols || y >= rows) ? -1 : y * cols + x;
+  function cellAt(event) {
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.floor((event.clientX - rect.left) / (rect.width / cols));
+    const y = Math.floor((event.clientY - rect.top) / (rect.height / rows));
+    if (x < 0 || y < 0 || x >= cols || y >= rows) return -1;
+    return indexOf(x, y);
   }
   function paint(i) {
-    if (busy || i === start || i === goal) return;
+    if (busy || i < 0 || i === start || i === goal) return;
+    if (terrain[i] === brush) return;
     terrain[i] = brush;
     if (state[i]) resetState();
     draw();
   }
-  cv.addEventListener('pointerdown', function (e) {
-    var i = cellAt(e); if (i < 0) return;
-    cv.setPointerCapture(e.pointerId);
-    drag = i === start ? 's' : i === goal ? 'g' : 'b';
-    if (drag === 'b') paint(i);
+
+  canvas.addEventListener("pointerdown", (event) => {
+    const i = cellAt(event);
+    if (i < 0) return;
+    canvas.setPointerCapture(event.pointerId);
+    if (i === start) drag = "start";
+    else if (i === goal) drag = "goal";
+    else { drag = "paint"; paint(i); }
   });
-  cv.addEventListener('pointermove', function (e) {
-    if (!drag) return;
-    var i = cellAt(e); if (i < 0) return;
-    if (drag === 'b') paint(i);
-    else if (!busy && i !== start && i !== goal && terrain[i] !== 1) {
-      if (drag === 's') start = i; else goal = i;
-      resetState(); draw();
+  canvas.addEventListener("pointermove", (event) => {
+    if (!drag || busy) return;
+    const i = cellAt(event);
+    if (i < 0) return;
+    if (drag === "paint") paint(i);
+    else if (i !== start && i !== goal && terrain[i] !== 1) {
+      if (drag === "start") start = i;
+      else goal = i;
+      resetState();
+      draw();
     }
   });
-  ['pointerup', 'pointercancel'].forEach(function (t) {
-    cv.addEventListener(t, function () { drag = null; });
+  ["pointerup", "pointercancel", "lostpointercapture"].forEach(type => {
+    canvas.addEventListener(type, () => { drag = null; });
   });
 
-  // ---- Controls ----
-  document.querySelectorAll('.seg button').forEach(function (b) {
-    b.onclick = function () {
-      brush = +b.dataset.b;
-      document.querySelectorAll('.seg button').forEach(function (o) {
-        o.setAttribute('aria-pressed', o === b);
+  document.querySelectorAll(".seg button").forEach(button => {
+    button.addEventListener("click", () => {
+      brush = Number(button.dataset.b);
+      document.querySelectorAll(".seg button").forEach(item => {
+        item.setAttribute("aria-pressed", String(item === button));
       });
-    };
+    });
   });
-  $('alg').onchange = function () { $('algNote').textContent = NOTES[this.value]; };
-  $('run').onclick = run;
-  $('clr').onclick = clearPath;
-  $('rst').onclick = function () { clearPath(); terrain.fill(0); draw(); };
-  $('maze').onclick = function () {
-    clearPath(); terrain.fill(0);
-    for (var i = 0; i < N; i++) {
+
+  $("alg").addEventListener("change", () => {
+    $("algNote").textContent = NOTES[$("alg").value];
+  });
+  $("spd").addEventListener("input", () => {
+    $("speedValue").textContent = `${$("spd").value} steps / frame`;
+  });
+  $("run").addEventListener("click", run);
+  $("clr").addEventListener("click", clearPath);
+  $("rst").addEventListener("click", () => {
+    clearPath();
+    terrain.fill(0);
+    draw();
+  });
+  $("maze").addEventListener("click", () => {
+    clearPath();
+    terrain.fill(0);
+    for (let i = 0; i < terrain.length; i++) {
       if (i === start || i === goal) continue;
-      var r = Math.random();
-      terrain[i] = r < .26 ? 1 : r < .34 ? 2 : 0;
+      const value = Math.random();
+      terrain[i] = value < .25 ? 1 : value < .34 ? 2 : 0;
     }
     draw();
-  };
+  });
 
-  $('algNote').textContent = NOTES.astar;
-  draw();
+  let resizeTimer = null;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      clearPath();
+      fitCanvas();
+    }, 120);
+  });
+
+  $("algNote").textContent = NOTES.astar;
+  $("speedValue").textContent = `${$("spd").value} steps / frame`;
+  fitCanvas();
 })();
